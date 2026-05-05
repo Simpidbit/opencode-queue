@@ -35,9 +35,9 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "latest",
-    "@opencode-ai/sdk": "latest",
-    "typescript": "^5.9.3"
+    "@opencode-ai/plugin": "^1.14.37",
+    "@opencode-ai/sdk": "^1.14.37",
+    "typescript": "^6.0.3"
   },
   "overrides": {
     "uuid": "^14.0.0"
