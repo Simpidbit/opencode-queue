@@ -135,7 +135,6 @@ export const QueuePlugin: Plugin = async ({ client }) => {
     if (item.kind === "shell") return shell(sid, item.shell, item.info)
 
     if (item.kind === "command") {
-      await prompt(sid, item.info, [{ type: "text", text: item.text }, ...item.files], true)
       await client.session.command({
         path: { id: sid },
         body: {
@@ -226,7 +225,6 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         }
 
         if (op.kind === "command") {
-          await client.session.prompt({ path: { id: sid }, body: { noReply: true, parts: [{ type: "text", text: op.text }, ...parts] } })
           await client.session.command({ path: { id: sid }, body: { command: op.cmd, arguments: op.args, parts } as any })
           throw new Error(HANDLED)
         }
