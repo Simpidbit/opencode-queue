@@ -32,6 +32,7 @@ continue after this task /queue
 /queue !ls
 
 /queue list
+/queue flush
 /queue clear
 /queue clear 1
 /queue clear 2 3
@@ -48,6 +49,7 @@ continue after this task /queue
 | `/queue !ls` | Queue an OpenCode shell block. |
 | `/queue` | Show the current queue. |
 | `/queue list` | Show the current queue. |
+| `/queue flush` | Send all queued entries immediately. |
 | `/queue clear` | Clear the current queue. |
 | `/queue clear 1` | Clear item 1 from the current queue. |
 | `/queue clear 2 3` | Clear items 2 and 3 from the current queue. |
@@ -60,6 +62,7 @@ When the session is busy:
 - The current agent run keeps using its original agent, model, and thinking variant.
 - Queued entries replay in order after the session becomes idle.
 - Only one queued entry is sent per idle transition, so queued work runs one item at a time.
+- `/queue flush` sends all queued entries immediately, even before the session is idle.
 
 When the session is idle:
 
@@ -69,6 +72,7 @@ When the session is idle:
 - `/review /queue` runs `/review` immediately.
 - `/queue !ls` runs `ls` immediately as an OpenCode shell block.
 - `/queue` and `/queue list` show the current queue.
+- `/queue flush` sends all queued entries immediately.
 - `/queue clear` clears the current queue, and `/queue clear 1` clears a specific queued item.
 
 ## Queue Management
@@ -76,6 +80,7 @@ When the session is idle:
 ```text
 /queue
 /queue list
+/queue flush
 /queue clear
 /queue clear 1
 /queue clear 2 3
