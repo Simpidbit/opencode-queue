@@ -4,6 +4,7 @@ import type { AgentPartInput, FilePart, FilePartInput, SubtaskPartInput, TextPar
 const QUEUE = /^\/queue(?:\s+([\s\S]*))?$/
 const SUFFIX = /^([\s\S]*?)\s+\/queue\s*$/
 const CMD = /^\/(\S+)(?:\s+([\s\S]*))?$/
+const ITEM_NUMBER = /^[1-9]\d*$/
 const HANDLED = "__QUEUE_HANDLED__"
 
 type InputPart = TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput
@@ -22,7 +23,7 @@ type Item =
 
 type Op =
   | { kind: "list" }
-  | { kind: "clear" }
+  | { kind: "clear"; indices: number[] }
   | { kind: "invalid"; text: string }
   | { kind: "prompt"; text: string; body: string }
   | { kind: "command"; text: string; cmd: string; args: string }
@@ -37,7 +38,13 @@ const parse = (body: string, files = 0): Op => {
   const text = body.trim()
   if (!files) {
     if (!text || text === "list") return { kind: "list" }
-    if (text === "clear") return { kind: "clear" }
+    const clear = text.match(/^clear(?:\s+([\s\S]+))?$/)
+    if (clear) {
+      const values = clear[1]?.trim().split(/\s+/) ?? []
+      const indices = values.map(Number)
+      if (values.some((value) => !ITEM_NUMBER.test(value)) || indices.some((index) => !Number.isSafeInteger(index))) return { kind: "invalid", text: "Queue clear expects one or more positive item numbers" }
+      return { kind: "clear", indices }
+    }
   }
 
   if (text.startsWith("!")) {
@@ -99,9 +106,22 @@ export const QueuePlugin: Plugin = async ({ client }) => {
   const manage = (sid: string, op: Extract<Op, { kind: "list" | "clear" }>) => {
     if (op.kind === "list") return (queue.get(sid) ?? []).map((item, i) => `${i + 1}. ${item.text}`).join("\n") || "Queue is empty"
 
-    const count = queue.get(sid)?.length ?? 0
-    queue.delete(sid)
-    return count ? `Cleared ${count} queued item${count === 1 ? "" : "s"}` : "Queue is empty"
+    const list = queue.get(sid)
+    if (!list?.length) return "Queue is empty"
+
+    if (!op.indices.length) {
+      const count = list.length
+      queue.delete(sid)
+      return `Cleared ${count} queued item${count === 1 ? "" : "s"}`
+    }
+
+    const targets = [...new Set(op.indices)].sort((a, b) => a - b)
+    const missing = targets.filter((index) => index > list.length)
+    if (missing.length) return `Queue item${missing.length === 1 ? "" : "s"} ${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not exist`
+
+    for (const index of targets.toReversed()) list.splice(index - 1, 1)
+    if (!list.length) queue.delete(sid)
+    return `Cleared queued item${targets.length === 1 ? "" : "s"} ${targets.join(", ")}`
   }
 
   const latest = async (sid: string): Promise<Info | undefined> => {

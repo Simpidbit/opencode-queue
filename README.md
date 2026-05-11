@@ -33,6 +33,8 @@ continue after this task /queue
 
 /queue list
 /queue clear
+/queue clear 1
+/queue clear 2 3
 ```
 
 ## Syntax
@@ -47,6 +49,8 @@ continue after this task /queue
 | `/queue` | Show the current queue. |
 | `/queue list` | Show the current queue. |
 | `/queue clear` | Clear the current queue. |
+| `/queue clear 1` | Clear item 1 from the current queue. |
+| `/queue clear 2 3` | Clear items 2 and 3 from the current queue. |
 
 ## Behavior
 
@@ -65,7 +69,7 @@ When the session is idle:
 - `/review /queue` runs `/review` immediately.
 - `/queue !ls` runs `ls` immediately as an OpenCode shell block.
 - `/queue` and `/queue list` show the current queue.
-- `/queue clear` clears the current queue.
+- `/queue clear` clears the current queue, and `/queue clear 1` clears a specific queued item.
 
 ## Queue Management
 
@@ -73,6 +77,8 @@ When the session is idle:
 /queue
 /queue list
 /queue clear
+/queue clear 1
+/queue clear 2 3
 ```
 
 The queue is in-memory and scoped to the current session.
