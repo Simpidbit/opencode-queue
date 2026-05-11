@@ -28,6 +28,9 @@
   "exports": {
     ".": "./index.ts"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "publishConfig": {
     "access": "public"
   },
