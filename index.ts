@@ -17,22 +17,22 @@ type Ask = { type: string; properties: { id: string; sessionID: string; question
 type Post = (input: { url: string; path?: Record<string, string>; body?: unknown; headers?: Record<string, string> }) => Promise<{ response?: Response; error?: unknown } | undefined>
 
 type Item =
-  | { kind: "prompt"; info: Info; text: string; parts: InputPart[] }
-  | { kind: "command"; info: Info; text: string; cmd: string; args: string; files: FilePartInput[] }
-  | { kind: "shell"; info: Info; text: string; shell: string }
+  | { kind: "prompt"; info: Info; label: string; body: string; parts: InputPart[] }
+  | { kind: "command"; info: Info; source: string; cmd: string; args: string; files: FilePartInput[] }
+  | { kind: "shell"; info: Info; source: string; shell: string }
 
 type Op =
   | { kind: "list" }
   | { kind: "clear"; indices: number[] }
   | { kind: "flush" }
-  | { kind: "invalid"; text: string }
-  | { kind: "prompt"; text: string; body: string }
-  | { kind: "command"; text: string; cmd: string; args: string }
-  | { kind: "shell"; text: string; shell: string }
+  | { kind: "invalid"; message: string }
+  | { kind: "prompt"; label: string; body: string }
+  | { kind: "command"; source: string; cmd: string; args: string }
+  | { kind: "shell"; source: string; shell: string }
 
 type ControlOp = Extract<Op, { kind: "list" | "clear" | "flush" }>
 
-const label = (body: string, files: number) => {
+const brief = (body: string, files: number) => {
   const text = body.trim() || `${files} attachment${files === 1 ? "" : "s"}`
   return text.length > 72 ? `${text.slice(0, 69)}...` : text
 }
@@ -46,21 +46,21 @@ const parse = (body: string, files = 0): Op => {
     if (clear) {
       const values = clear[1]?.trim().split(/\s+/) ?? []
       const indices = values.map(Number)
-      if (values.some((value) => !ITEM_NUMBER.test(value)) || indices.some((index) => !Number.isSafeInteger(index))) return { kind: "invalid", text: "Queue clear expects one or more positive item numbers" }
+      if (values.some((value) => !ITEM_NUMBER.test(value)) || indices.some((index) => !Number.isSafeInteger(index))) return { kind: "invalid", message: "Queue clear expects one or more positive item numbers" }
       return { kind: "clear", indices }
     }
   }
 
   if (text.startsWith("!")) {
     const shell = text.slice(1).trim()
-    if (!shell) return { kind: "invalid", text: "Queue shell command is empty" }
-    if (files) return { kind: "invalid", text: "Queued shell commands do not support attachments" }
-    return { kind: "shell", text, shell }
+    if (!shell) return { kind: "invalid", message: "Queue shell command is empty" }
+    if (files) return { kind: "invalid", message: "Queued shell commands do not support attachments" }
+    return { kind: "shell", source: text, shell }
   }
 
   const match = text.match(CMD)
-  if (match) return { kind: "command", text, cmd: match[1], args: match[2] ?? "" }
-  return { kind: "prompt", text: label(body, files), body }
+  if (match) return { kind: "command", source: text, cmd: match[1], args: match[2] ?? "" }
+  return { kind: "prompt", label: brief(body, files), body }
 }
 
 const trailing = (text: string) => (text.trim() === "/queue" ? "" : text.match(SUFFIX)?.[1])
@@ -216,7 +216,11 @@ export const QueuePlugin: Plugin = async ({ client }) => {
   }
 
   const manage = async (sid: string, op: ControlOp) => {
-    if (op.kind === "list") return (queue.get(sid) ?? []).map((item, i) => `${i + 1}. ${item.text}`).join("\n") || "Queue is empty"
+    if (op.kind === "list") {
+      return (queue.get(sid) ?? [])
+        .map((item, i) => `${i + 1}. ${item.kind === "prompt" ? (item.body.trim() ? item.body : item.label) : item.source}`)
+        .join("\n") || "Queue is empty"
+    }
     if (op.kind === "clear") return clear(sid, op.indices)
 
     const result = await flush(sid)
@@ -272,7 +276,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       const op = parse(body, parts.length)
 
       if (control(op)) return stop(await manage(sid, op))
-      if (op.kind === "invalid") return stop(op.text, "error")
+      if (op.kind === "invalid") return stop(op.message, "error")
 
       if (!busy.has(sid)) {
         if (op.kind === "shell") {
@@ -310,7 +314,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
       if (op.kind === "invalid") {
         hide(output.message.id, text)
-        await toast(op.text, "error", 5000)
+        await toast(op.message, "error", 5000)
         return
       }
 
@@ -346,7 +350,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
       queue.set(sid, [...(queue.get(sid) ?? []), item])
       hide(output.message.id, text)
-      await toast(`Queued: ${item.text}`, "info")
+      await toast(`Queued: ${item.kind === "prompt" ? item.label : item.source}`, "info")
     },
     "experimental.chat.messages.transform": async (_, output) => {
       output.messages = output.messages.filter((msg) => !hidden.has(msg.info.id))
