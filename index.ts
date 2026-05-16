@@ -2,7 +2,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import type { AgentPartInput, FilePart, FilePartInput, SubtaskPartInput, TextPart, TextPartInput } from "@opencode-ai/sdk"
 
 const QUEUE = /^\/queue(?:\s+([\s\S]*))?$/
-const SUFFIX = /^([\s\S]*?)\s+\/queue\s*$/
+const SUFFIX = /^([\s\S]*?)\s+\/queue(?:\s+(front))?\s*$/
 const CMD = /^\/(\S+)(?:\s+([\s\S]*))?$/
 const ITEM_NUMBER = /^[1-9]\d*$/
 const HANDLED = "__QUEUE_HANDLED__"
@@ -15,20 +15,24 @@ type Info = { agent: string; model: Model } & Meta
 type Msg = { info: { role: string; agent?: string; mode?: string; model?: Model; providerID?: string; modelID?: string } & Meta }
 type Ask = { type: string; properties: { id: string; sessionID: string; questions: { question: string; header: string }[] } }
 type Post = (input: { url: string; path?: Record<string, string>; body?: unknown; headers?: Record<string, string> }) => Promise<{ response?: Response; error?: unknown } | undefined>
+type QueueInput = { body: string; front: boolean }
 
 type Item =
   | { kind: "prompt"; info: Info; label: string; body: string; parts: InputPart[] }
   | { kind: "command"; info: Info; source: string; cmd: string; args: string; files: FilePartInput[] }
   | { kind: "shell"; info: Info; source: string; shell: string }
 
+type EntryOp =
+  | { kind: "prompt"; label: string; body: string }
+  | { kind: "command"; source: string; cmd: string; args: string }
+  | { kind: "shell"; source: string; shell: string }
+
 type Op =
   | { kind: "list" }
   | { kind: "clear"; indices: number[] }
   | { kind: "flush" }
   | { kind: "invalid"; message: string }
-  | { kind: "prompt"; label: string; body: string }
-  | { kind: "command"; source: string; cmd: string; args: string }
-  | { kind: "shell"; source: string; shell: string }
+  | (EntryOp & { front: boolean })
 
 type ControlOp = Extract<Op, { kind: "list" | "clear" | "flush" }>
 
@@ -37,9 +41,15 @@ const brief = (body: string, files: number) => {
   return text.length > 72 ? `${text.slice(0, 69)}...` : text
 }
 
-const parse = (body: string, files = 0): Op => {
-  const text = body.trim()
-  if (!files) {
+const parsePrefix = (body: string): QueueInput => {
+  const match = body.trim().match(/^front(?:\s+([\s\S]*))?$/)
+  return match ? { body: match[1] ?? "", front: true } : { body, front: false }
+}
+
+const parse = (input: QueueInput, files = 0): Op => {
+  const text = input.body.trim()
+  const front = input.front
+  if (!front && !files) {
     if (!text || text === "list") return { kind: "list" }
     if (text === "flush") return { kind: "flush" }
     const clear = text.match(/^clear(?:\s+([\s\S]+))?$/)
@@ -50,22 +60,33 @@ const parse = (body: string, files = 0): Op => {
       return { kind: "clear", indices }
     }
   }
+  if (front && !text && !files) return { kind: "invalid", message: "Queue front input is empty" }
 
   if (text.startsWith("!")) {
     const shell = text.slice(1).trim()
     if (!shell) return { kind: "invalid", message: "Queue shell command is empty" }
     if (files) return { kind: "invalid", message: "Queued shell commands do not support attachments" }
-    return { kind: "shell", source: text, shell }
+    return { kind: "shell", source: text, shell, front }
   }
 
   const match = text.match(CMD)
-  if (match) return { kind: "command", source: text, cmd: match[1], args: match[2] ?? "" }
-  return { kind: "prompt", label: brief(body, files), body }
+  if (match) return { kind: "command", source: text, cmd: match[1], args: match[2] ?? "", front }
+  return { kind: "prompt", label: brief(input.body, files), body: input.body, front }
 }
 
-const trailing = (text: string) => (text.trim() === "/queue" ? "" : text.match(SUFFIX)?.[1])
-const strip = (text: string) => trailing(text) ?? text
-const queued = (text: string) => text.match(QUEUE)?.[1] ?? trailing(text)
+const parseSuffix = (text: string): QueueInput | undefined => {
+  const trimmed = text.trim()
+  if (trimmed === "/queue") return { body: "", front: false }
+  if (trimmed === "/queue front") return { body: "", front: true }
+
+  const match = text.match(SUFFIX)
+  return match ? { body: match[1], front: match[2] === "front" } : undefined
+}
+const stripSuffix = (text: string) => parseSuffix(text)?.body ?? text
+const parseInput = (text: string): QueueInput | undefined => {
+  const prefix = text.match(QUEUE)
+  return prefix ? parsePrefix(prefix[1] ?? "") : parseSuffix(text)
+}
 const control = (op: Op): op is ControlOp => op.kind === "list" || op.kind === "clear" || op.kind === "flush"
 const plan = (event: unknown): event is Ask => {
   if (typeof event !== "object" || !event || !("type" in event) || event.type !== "question.asked") return false
@@ -119,6 +140,17 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
   const requeue = (sid: string, items: Item[]) => {
     if (items.length) queue.set(sid, [...items, ...(queue.get(sid) ?? [])])
+  }
+
+  const enqueue = (sid: string, item: Item, front: boolean) => {
+    const list = queue.get(sid)
+    if (!list) {
+      queue.set(sid, [item])
+      return
+    }
+
+    if (front) list.unshift(item)
+    else list.push(item)
   }
 
   const clear = (sid: string, indices: number[]) => {
@@ -261,19 +293,20 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       const parts = files(output.parts)
 
       if (input.command !== "queue") {
-        const args = trailing(body)
-        if (args === undefined) return
+        const queued = parseSuffix(body)
+        if (!queued) return
 
         if (!busy.has(sid)) {
-          for (const part of output.parts) if (part.type === "text") part.text = strip(part.text)
+          for (const part of output.parts) if (part.type === "text") part.text = stripSuffix(part.text)
           return
         }
 
-        output.parts.splice(0, output.parts.length, { type: "text", text: `/queue /${input.command}${args.trim() ? ` ${args.trim()}` : ""}` } as any, ...parts)
+        output.parts.splice(0, output.parts.length, { type: "text", text: `/queue${queued.front ? " front" : ""} /${input.command}${queued.body.trim() ? ` ${queued.body.trim()}` : ""}` } as any, ...parts)
         return
       }
 
-      const op = parse(body, parts.length)
+      const queued = parsePrefix(body)
+      const op = parse(queued, parts.length)
 
       if (control(op)) return stop(await manage(sid, op))
       if (op.kind === "invalid") return stop(op.message, "error")
@@ -300,11 +333,11 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       const text = output.parts.find((part): part is TextPart => part.type === "text" && !part.synthetic)
       if (!text) return
 
-      const body = queued(text.text)
-      if (body === undefined) return
+      const request = parseInput(text.text)
+      if (!request) return
 
       const parts = files(output.parts)
-      const op = parse(body, parts.length)
+      const op = parse(request, parts.length)
 
       if (control(op)) {
         hide(output.message.id, text)
@@ -325,7 +358,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
           await shell(sid, op.shell, { agent: output.message.agent, model: output.message.model })
           return
         }
-        text.text = body
+        text.text = request.body
         return
       }
 
@@ -334,23 +367,27 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       const prior = await latest(sid)
       if (prior) Object.assign(output.message, opts(prior))
       else console.warn("QueuePlugin could not neutralize queued placeholder metadata because the session has no previous message context")
-      const item: Item =
-        op.kind === "shell" ? { ...op, info } :
-        op.kind === "command" ? { ...op, info, files: parts } :
-        {
-          ...op,
+      let item: Item
+      if (op.kind === "shell") item = { kind: "shell", info, source: op.source, shell: op.shell }
+      else if (op.kind === "command") item = { kind: "command", info, source: op.source, cmd: op.cmd, args: op.args, files: parts }
+      else {
+        item = {
+          kind: "prompt",
           info,
+          label: op.label,
+          body: op.body,
           parts: output.parts.flatMap((part): InputPart[] => {
-            if (part.type === "text") return part.id === text.id ? (body ? [{ ...part, text: body }] : []) : [{ ...part }]
+            if (part.type === "text") return part.id === text.id ? (request.body ? [{ ...part, text: request.body }] : []) : [{ ...part }]
             if (part.type === "file" || part.type === "agent" || part.type === "subtask") return [{ ...part }]
             console.warn("QueuePlugin skipped unexpected part", part.type)
             return []
           }),
         }
+      }
 
-      queue.set(sid, [...(queue.get(sid) ?? []), item])
+      enqueue(sid, item, op.front)
       hide(output.message.id, text)
-      await toast(`Queued: ${item.kind === "prompt" ? item.label : item.source}`, "info")
+      await toast(`${op.front ? "Queued first" : "Queued"}: ${item.kind === "prompt" ? item.label : item.source}`, "info")
     },
     "experimental.chat.messages.transform": async (_, output) => {
       output.messages = output.messages.filter((msg) => !hidden.has(msg.info.id))

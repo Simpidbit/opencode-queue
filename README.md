@@ -25,11 +25,16 @@ Restart OpenCode after installing. OpenCode installs npm plugins automatically a
 ```text
 /queue continue after this task
 continue after this task /queue
+/queue front do this next
+do this next /queue front
 
 /queue /review
 /review /queue
+/queue front /review
+/review /queue front
 
 /queue !ls
+/queue front !pwd
 
 /queue list
 /queue flush
@@ -44,9 +49,14 @@ continue after this task /queue
 | --- | --- |
 | `/queue message` | Queue a normal prompt. |
 | `message /queue` | Queue a normal prompt using trailing syntax. |
+| `/queue front message` | Queue a normal prompt before existing queued entries. |
+| `message /queue front` | Queue a normal prompt before existing queued entries using trailing syntax. |
 | `/queue /review` | Queue a slash command. |
 | `/review /queue` | Queue a slash command using trailing syntax. |
+| `/queue front /review` | Queue a slash command before existing queued entries. |
+| `/review /queue front` | Queue a slash command before existing queued entries using trailing syntax. |
 | `/queue !ls` | Queue an OpenCode shell block. |
+| `/queue front !ls` | Queue an OpenCode shell block before existing queued entries. |
 | `/queue` | Show the current queue. |
 | `/queue list` | Show the current queue. |
 | `/queue flush` | Send all queued entries immediately. |
@@ -61,6 +71,7 @@ When the session is busy:
 - Queued entries are hidden from the transcript and from the running agent.
 - The current agent run keeps using its original agent, model, and thinking variant.
 - Queued entries replay in order after the session becomes idle.
+- `/queue front ...` puts an entry before the existing queued entries.
 - Only one queued entry is sent per idle transition, so queued work runs one item at a time.
 - `/queue flush` sends all queued entries immediately, even before the session is idle.
 
