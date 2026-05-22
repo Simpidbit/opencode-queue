@@ -27,14 +27,18 @@ type EntryOp =
   | { kind: "command"; source: string; cmd: string; args: string }
   | { kind: "shell"; source: string; shell: string }
 
+type State = { items: Item[]; busy: boolean; flushing: boolean; stopped: boolean; failed: boolean }
+
 type Op =
   | { kind: "list" }
   | { kind: "clear"; indices: number[] }
   | { kind: "flush" }
+  | { kind: "start" }
+  | { kind: "stop" }
   | { kind: "invalid"; message: string }
   | (EntryOp & { front: boolean })
 
-type ControlOp = Extract<Op, { kind: "list" | "clear" | "flush" }>
+type ControlOp = Extract<Op, { kind: "list" | "clear" | "flush" | "start" | "stop" }>
 
 const brief = (body: string, files: number) => {
   const text = body.trim() || `${files} attachment${files === 1 ? "" : "s"}`
@@ -50,8 +54,18 @@ const parse = (input: QueueInput, files = 0): Op => {
   const text = input.body.trim()
   const front = input.front
   if (!front && !files) {
-    if (!text || text === "list") return { kind: "list" }
-    if (text === "flush") return { kind: "flush" }
+    switch (text) {
+      case "":
+      case "list":
+        return { kind: "list" }
+      case "flush":
+        return { kind: "flush" }
+      case "start":
+        return { kind: "start" }
+      case "stop":
+        return { kind: "stop" }
+    }
+
     const clear = text.match(/^clear(?:\s+([\s\S]+))?$/)
     if (clear) {
       const values = clear[1]?.trim().split(/\s+/) ?? []
@@ -87,7 +101,18 @@ const parseInput = (text: string): QueueInput | undefined => {
   const prefix = text.match(QUEUE)
   return prefix ? parsePrefix(prefix[1] ?? "") : parseSuffix(text)
 }
-const control = (op: Op): op is ControlOp => op.kind === "list" || op.kind === "clear" || op.kind === "flush"
+const control = (op: Op): op is ControlOp => {
+  switch (op.kind) {
+    case "list":
+    case "clear":
+    case "flush":
+    case "start":
+    case "stop":
+      return true
+    default:
+      return false
+  }
+}
 const plan = (event: unknown): event is Ask => {
   if (typeof event !== "object" || !event || !("type" in event) || event.type !== "question.asked") return false
   const question = (event as Ask).properties?.questions?.[0]
@@ -95,11 +120,18 @@ const plan = (event: unknown): event is Ask => {
 }
 
 export const QueuePlugin: Plugin = async ({ client }) => {
-  const queue = new Map<string, Item[]>()
+  const sessions = new Map<string, State>()
   const hidden = new Set<string>()
-  const busy = new Set<string>()
-  const active = new Set<string>()
   const post = (client as unknown as { _client?: { post?: Post } })._client?.post
+
+  const state = (sid: string) => {
+    let current = sessions.get(sid)
+    if (!current) {
+      current = { items: [], busy: false, flushing: false, stopped: false, failed: false }
+      sessions.set(sid, current)
+    }
+    return current
+  }
 
   const toast = (message: string, variant: "info" | "error", duration = 2500) =>
     client.tui.showToast({ body: { message, variant, duration } }).catch(() => undefined)
@@ -129,37 +161,13 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
   const files = (parts: { type: string }[]) => parts.filter((part): part is FilePart => part.type === "file").map((part) => ({ ...part }))
 
-  const take = (sid: string, count = Infinity) => {
-    const list = queue.get(sid)
-    if (!list?.length) return []
-
-    const items = list.splice(0, count)
-    if (!list.length) queue.delete(sid)
-    return items
-  }
-
-  const requeue = (sid: string, items: Item[]) => {
-    if (items.length) queue.set(sid, [...items, ...(queue.get(sid) ?? [])])
-  }
-
-  const enqueue = (sid: string, item: Item, front: boolean) => {
-    const list = queue.get(sid)
-    if (!list) {
-      queue.set(sid, [item])
-      return
-    }
-
-    if (front) list.unshift(item)
-    else list.push(item)
-  }
-
-  const clear = (sid: string, indices: number[]) => {
-    const list = queue.get(sid)
-    if (!list?.length) return "Queue is empty"
+  const clear = (current: State, indices: number[]) => {
+    const list = current.items
+    if (!list.length) return "Queue is empty"
 
     if (!indices.length) {
       const count = list.length
-      queue.delete(sid)
+      list.splice(0)
       return `Cleared ${count} queued item${count === 1 ? "" : "s"}`
     }
 
@@ -168,7 +176,6 @@ export const QueuePlugin: Plugin = async ({ client }) => {
     if (missing.length) return `Queue item${missing.length === 1 ? "" : "s"} ${missing.join(", ")} ${missing.length === 1 ? "does" : "do"} not exist`
 
     for (const index of targets.toReversed()) list.splice(index - 1, 1)
-    if (!list.length) queue.delete(sid)
     return `Cleared queued item${targets.length === 1 ? "" : "s"} ${targets.join(", ")}`
   }
 
@@ -223,10 +230,11 @@ export const QueuePlugin: Plugin = async ({ client }) => {
   }
 
   const flush = async (sid: string, count = Infinity) => {
-    const items = take(sid, count)
+    const current = state(sid)
+    const items = current.items.splice(0, count)
     if (!items.length) return { sent: 0, failed: 0 }
 
-    active.add(sid)
+    current.flushing = true
     let failed = 0
     const retry: Item[] = []
     try {
@@ -241,25 +249,47 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         }
       }
     } finally {
-      requeue(sid, retry)
-      active.delete(sid)
+      if (retry.length) current.items.unshift(...retry)
+      current.flushing = false
     }
     return { sent: items.length - failed, failed }
   }
 
+  const advance = (sid: string) => {
+    const current = state(sid)
+    if (!current.items.length || current.busy || current.stopped || current.flushing) return
+    void flush(sid, 1)
+  }
+
   const manage = async (sid: string, op: ControlOp) => {
-    if (op.kind === "list") {
-      return (queue.get(sid) ?? [])
-        .map((item, i) => `${i + 1}. ${item.kind === "prompt" ? (item.body.trim() ? item.body : item.label) : item.source}`)
-        .join("\n") || "Queue is empty"
+    const current = state(sid)
+
+    switch (op.kind) {
+      case "list": {
+        const list =
+          current.items
+            .map((item, i) => `${i + 1}. ${item.kind === "prompt" ? (item.body.trim() ? item.body : item.label) : item.source}`)
+            .join("\n") || "Queue is empty"
+        return current.stopped ? `${list}\nQueue is stopped` : list
+      }
+      case "clear":
+        return clear(current, op.indices)
+      case "stop":
+        current.stopped = true
+        return "Queue stopped"
+      case "start":
+        current.stopped = false
+        current.failed = false
+        advance(sid)
+        return "Queue started"
+      case "flush": {
+        const result = await flush(sid)
+        if (!result.sent && !result.failed) return "Queue is empty"
+
+        const message = `Flushed ${result.sent} queued item${result.sent === 1 ? "" : "s"}`
+        return result.failed ? `${message}; ${result.failed} failed` : message
+      }
     }
-    if (op.kind === "clear") return clear(sid, op.indices)
-
-    const result = await flush(sid)
-    if (!result.sent && !result.failed) return "Queue is empty"
-
-    const message = `Flushed ${result.sent} queued item${result.sent === 1 ? "" : "s"}`
-    return result.failed ? `${message}; ${result.failed} failed` : message
   }
 
   return {
@@ -270,22 +300,38 @@ export const QueuePlugin: Plugin = async ({ client }) => {
     event: async ({ event }) => {
       if (plan(event)) {
         const sid = event.properties.sessionID
-        if (!active.has(sid) && !queue.get(sid)?.length) return
+        const current = sessions.get(sid)
+        if (!current || (!current.flushing && (current.stopped || !current.items.length))) return
         await no(event.properties.id)
         await toast("Declined plan approval to continue queued work", "info")
         return
       }
 
-      if (event.type !== "session.status") return
-
-      const sid = event.properties.sessionID
-      if (event.properties.status.type !== "idle") {
-        busy.add(sid)
+      if (event.type === "session.error") {
+        const sid = event.properties.sessionID
+        if (sid) state(sid).failed = true
+        else console.warn("QueuePlugin could not suppress queued replay after session.error because the event has no sessionID")
         return
       }
 
-      busy.delete(sid)
-      void flush(sid, 1)
+      if (event.type === "session.idle") {
+        const current = state(event.properties.sessionID)
+        current.busy = false
+        if (!current.failed) advance(event.properties.sessionID)
+        current.failed = false
+        return
+      }
+
+      if (event.type !== "session.status") return
+
+      const current = state(event.properties.sessionID)
+      if (event.properties.status.type !== "idle") {
+        current.busy = true
+        current.failed = false
+        return
+      }
+
+      current.busy = false
     },
     "command.execute.before": async (input, output) => {
       const sid = input.sessionID
@@ -296,7 +342,9 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         const queued = parseSuffix(body)
         if (!queued) return
 
-        if (!busy.has(sid)) {
+        const current = sessions.get(sid)
+        const shouldQueue = Boolean(current?.busy || current?.stopped)
+        if (!shouldQueue) {
           for (const part of output.parts) if (part.type === "text") part.text = stripSuffix(part.text)
           return
         }
@@ -305,13 +353,14 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         return
       }
 
-      const queued = parsePrefix(body)
-      const op = parse(queued, parts.length)
+      const current = sessions.get(sid)
+      const shouldQueue = Boolean(current?.busy || current?.stopped)
+      const op = parse(parsePrefix(body), parts.length)
 
       if (control(op)) return stop(await manage(sid, op))
       if (op.kind === "invalid") return stop(op.message, "error")
 
-      if (!busy.has(sid)) {
+      if (!shouldQueue) {
         if (op.kind === "shell") {
           await shell(sid, op.shell, await run(sid))
           throw new Error(HANDLED)
@@ -336,6 +385,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       const request = parseInput(text.text)
       if (!request) return
 
+      const current = state(sid)
       const parts = files(output.parts)
       const op = parse(request, parts.length)
 
@@ -351,7 +401,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         return
       }
 
-      if (!busy.has(sid)) {
+      if (!current.busy && !current.stopped) {
         if (op.kind === "command") return
         if (op.kind === "shell") {
           hide(output.message.id, text)
@@ -385,7 +435,8 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         }
       }
 
-      enqueue(sid, item, op.front)
+      if (op.front) current.items.unshift(item)
+      else current.items.push(item)
       hide(output.message.id, text)
       await toast(`${op.front ? "Queued first" : "Queued"}: ${item.kind === "prompt" ? item.label : item.source}`, "info")
     },

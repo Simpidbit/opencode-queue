@@ -37,6 +37,8 @@ do this next /queue front
 /queue front !pwd
 
 /queue list
+/queue stop
+/queue start
 /queue flush
 /queue clear
 /queue clear 1
@@ -59,6 +61,8 @@ do this next /queue front
 | `/queue front !ls` | Queue an OpenCode shell block before existing queued entries. |
 | `/queue` | Show the current queue. |
 | `/queue list` | Show the current queue. |
+| `/queue stop` | Pause automatic sending of queued entries. |
+| `/queue start` | Resume automatic sending of queued entries. |
 | `/queue flush` | Send all queued entries immediately. |
 | `/queue clear` | Clear the current queue. |
 | `/queue clear 1` | Clear item 1 from the current queue. |
@@ -73,6 +77,7 @@ When the session is busy:
 - Queued entries replay in order after the session becomes idle.
 - `/queue front ...` puts an entry before the existing queued entries.
 - Only one queued entry is sent per idle transition, so queued work runs one item at a time.
+- `/queue stop` pauses automatic replay without clearing queued entries, and `/queue start` resumes it.
 - `/queue flush` sends all queued entries immediately, even before the session is idle.
 
 When the session is idle:
@@ -83,6 +88,7 @@ When the session is idle:
 - `/review /queue` runs `/review` immediately.
 - `/queue !ls` runs `ls` immediately as an OpenCode shell block.
 - `/queue` and `/queue list` show the current queue.
+- `/queue stop` pauses automatic replay, and `/queue start` resumes it.
 - `/queue flush` sends all queued entries immediately.
 - `/queue clear` clears the current queue, and `/queue clear 1` clears a specific queued item.
 
@@ -91,6 +97,8 @@ When the session is idle:
 ```text
 /queue
 /queue list
+/queue stop
+/queue start
 /queue flush
 /queue clear
 /queue clear 1
