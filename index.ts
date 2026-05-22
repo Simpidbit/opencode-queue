@@ -309,8 +309,11 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
       if (event.type === "session.error") {
         const sid = event.properties.sessionID
-        if (sid) state(sid).failed = true
-        else console.warn("QueuePlugin could not suppress queued replay after session.error because the event has no sessionID")
+        if (!sid) {
+          console.warn("QueuePlugin could not suppress queued replay after session.error because the event has no sessionID")
+          return
+        }
+        state(sid).failed = true
         return
       }
 

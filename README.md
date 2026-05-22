@@ -74,9 +74,10 @@ When the session is busy:
 
 - Queued entries are hidden from the transcript and from the running agent.
 - The current agent run keeps using its original agent, model, and thinking variant.
-- Queued entries replay in order after the session becomes idle.
+- Queued entries replay in order after the session completes normally and becomes idle.
 - `/queue front ...` puts an entry before the existing queued entries.
 - Only one queued entry is sent per idle transition, so queued work runs one item at a time.
+- Queued entries are kept in place after an error or abort.
 - `/queue stop` pauses automatic replay without clearing queued entries, and `/queue start` resumes it.
 - `/queue flush` sends all queued entries immediately, even before the session is idle.
 
