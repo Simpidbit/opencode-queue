@@ -27,7 +27,8 @@ type EntryOp =
   | { kind: "command"; source: string; cmd: string; args: string }
   | { kind: "shell"; source: string; shell: string }
 
-type State = { items: Item[]; busy: boolean; flushing: boolean; stopped: boolean; failed: boolean }
+type Activity = { kind: "idle" } | { kind: "busy" } | { kind: "sending"; idle: boolean }
+type State = { items: Item[]; activity: Activity; stopped: boolean; failed: boolean }
 
 type Op =
   | { kind: "list" }
@@ -127,7 +128,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
   const state = (sid: string) => {
     let current = sessions.get(sid)
     if (!current) {
-      current = { items: [], busy: false, flushing: false, stopped: false, failed: false }
+      current = { items: [], activity: { kind: "idle" }, stopped: false, failed: false }
       sessions.set(sid, current)
     }
     return current
@@ -229,16 +230,42 @@ export const QueuePlugin: Plugin = async ({ client }) => {
     console.warn("QueuePlugin skipped queued item without replayable content")
   }
 
+  const advance = (sid: string) => {
+    const current = state(sid)
+    if (current.activity.kind !== "idle" || current.stopped || !current.items.length) return
+    void flush(sid, 1)
+  }
+
+  const settle = (sid: string, resume: boolean) => {
+    const current = state(sid)
+    current.activity = { kind: "idle" }
+    if (current.failed) {
+      current.failed = false
+      return
+    }
+
+    if (resume) advance(sid)
+  }
+
+  const idle = (sid: string) => {
+    const current = state(sid)
+    if (current.activity.kind === "sending") {
+      current.activity.idle = true
+      return
+    }
+    if (current.activity.kind === "busy") settle(sid, true)
+  }
+
   const flush = async (sid: string, count = Infinity) => {
     const current = state(sid)
     const items = current.items.splice(0, count)
     if (!items.length) return { sent: 0, failed: 0 }
 
-    current.flushing = true
     let failed = 0
     const retry: Item[] = []
     try {
       for (const item of items) {
+        current.activity = { kind: "sending", idle: false }
         try {
           await replay(sid, item)
         } catch (error) {
@@ -250,15 +277,11 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       }
     } finally {
       if (retry.length) current.items.unshift(...retry)
-      current.flushing = false
+      const replayCompleted = current.activity.kind === "sending" && current.activity.idle
+      if (replayCompleted) settle(sid, count === 1 && failed === 0)
+      else current.activity = failed ? { kind: "idle" } : { kind: "busy" }
     }
     return { sent: items.length - failed, failed }
-  }
-
-  const advance = (sid: string) => {
-    const current = state(sid)
-    if (!current.items.length || current.busy || current.stopped || current.flushing) return
-    void flush(sid, 1)
   }
 
   const manage = async (sid: string, op: ControlOp) => {
@@ -301,7 +324,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       if (plan(event)) {
         const sid = event.properties.sessionID
         const current = sessions.get(sid)
-        if (!current || (!current.flushing && (current.stopped || !current.items.length))) return
+        if (!current || (current.activity.kind !== "sending" && (current.stopped || !current.items.length))) return
         await no(event.properties.id)
         await toast("Declined plan approval to continue queued work", "info")
         return
@@ -318,23 +341,21 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       }
 
       if (event.type === "session.idle") {
-        const current = state(event.properties.sessionID)
-        current.busy = false
-        if (!current.failed) advance(event.properties.sessionID)
-        current.failed = false
+        idle(event.properties.sessionID)
         return
       }
 
       if (event.type !== "session.status") return
 
-      const current = state(event.properties.sessionID)
+      const sid = event.properties.sessionID
+      const current = state(sid)
       if (event.properties.status.type !== "idle") {
-        current.busy = true
+        if (current.activity.kind !== "sending") current.activity = { kind: "busy" }
         current.failed = false
         return
       }
 
-      current.busy = false
+      idle(sid)
     },
     "command.execute.before": async (input, output) => {
       const sid = input.sessionID
@@ -346,7 +367,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         if (!queued) return
 
         const current = sessions.get(sid)
-        const shouldQueue = Boolean(current?.busy || current?.stopped)
+        const shouldQueue = Boolean(current && (current.activity.kind !== "idle" || current.stopped))
         if (!shouldQueue) {
           for (const part of output.parts) if (part.type === "text") part.text = stripSuffix(part.text)
           return
@@ -357,7 +378,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       }
 
       const current = sessions.get(sid)
-      const shouldQueue = Boolean(current?.busy || current?.stopped)
+      const shouldQueue = Boolean(current && (current.activity.kind !== "idle" || current.stopped))
       const op = parse(parsePrefix(body), parts.length)
 
       if (control(op)) return stop(await manage(sid, op))
@@ -404,7 +425,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         return
       }
 
-      if (!current.busy && !current.stopped) {
+      if (current.activity.kind === "idle" && !current.stopped) {
         if (op.kind === "command") return
         if (op.kind === "shell") {
           hide(output.message.id, text)
