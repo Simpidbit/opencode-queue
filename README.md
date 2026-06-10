@@ -33,6 +33,9 @@ do this next /queue front
 /queue front /review
 /review /queue front
 
+/queue /compact
+/queue front /compact
+
 /queue !ls
 /queue front !pwd
 
@@ -57,6 +60,8 @@ do this next /queue front
 | `/review /queue` | Queue a slash command using trailing syntax. |
 | `/queue front /review` | Queue a slash command before existing queued entries. |
 | `/review /queue front` | Queue a slash command before existing queued entries using trailing syntax. |
+| `/queue /compact` | Queue OpenCode's built-in TUI `/compact` command. |
+| `/queue front /compact` | Queue OpenCode's built-in TUI `/compact` command before existing queued entries. |
 | `/queue !ls` | Queue an OpenCode shell block. |
 | `/queue front !ls` | Queue an OpenCode shell block before existing queued entries. |
 | `/queue` | Show the current queue. |
@@ -87,6 +92,7 @@ When the session is idle:
 - `message /queue` sends `message` immediately.
 - `/queue /review` runs `/review` immediately.
 - `/review /queue` runs `/review` immediately.
+- `/queue /compact` runs OpenCode's built-in TUI `/compact` command immediately.
 - `/queue !ls` runs `ls` immediately as an OpenCode shell block.
 - `/queue` and `/queue list` show the current queue.
 - `/queue stop` pauses automatic replay, and `/queue start` resumes it.

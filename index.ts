@@ -20,11 +20,13 @@ type QueueInput = { body: string; front: boolean }
 type Item =
   | { kind: "prompt"; info: Info; label: string; body: string; parts: InputPart[] }
   | { kind: "command"; info: Info; source: string; cmd: string; args: string; files: FilePartInput[] }
+  | { kind: "compact"; info: Info; source: string }
   | { kind: "shell"; info: Info; source: string; shell: string }
 
 type EntryOp =
   | { kind: "prompt"; label: string; body: string }
   | { kind: "command"; source: string; cmd: string; args: string }
+  | { kind: "compact"; source: string }
   | { kind: "shell"; source: string; shell: string }
 
 type Activity = { kind: "idle" } | { kind: "busy" } | { kind: "sending"; idle: boolean }
@@ -85,7 +87,16 @@ const parse = (input: QueueInput, files = 0): Op => {
   }
 
   const match = text.match(CMD)
-  if (match) return { kind: "command", source: text, cmd: match[1], args: match[2] ?? "", front }
+  if (match) {
+    const cmd = match[1]
+    const args = match[2] ?? ""
+    if (cmd === "compact") {
+      if (args.trim()) return { kind: "invalid", message: "Queue compact does not accept arguments" }
+      if (files) return { kind: "invalid", message: "Queue compact does not support attachments" }
+      return { kind: "compact", source: text, front }
+    }
+    return { kind: "command", source: text, cmd, args, front }
+  }
   return { kind: "prompt", label: brief(input.body, files), body: input.body, front }
 }
 
@@ -206,9 +217,18 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
   const prompt = (sid: string, info: Info, parts: InputPart[], noReply?: boolean) => client.session.prompt({ path: { id: sid }, body: { ...opts(info), noReply, parts } as any })
   const shell = (sid: string, command: string, info: Run) => client.session.shell({ path: { id: sid }, body: { agent: info.agent, model: info.model, command } })
+  // TUI command events target the focused session; queued replay must target the original session.
+  const compact = (sid: string, info: Info) =>
+    client.session.summarize({
+      path: { id: sid },
+      body: { providerID: info.model.providerID, modelID: info.model.modelID },
+      throwOnError: true,
+    })
+  const tuiCommand = (command: string) => client.tui.executeCommand({ body: { command }, throwOnError: true })
 
   const replay = async (sid: string, item: Item) => {
     if (item.kind === "shell") return shell(sid, item.shell, item.info)
+    if (item.kind === "compact") return compact(sid, item.info)
 
     if (item.kind === "command") {
       await client.session.command({
@@ -390,6 +410,11 @@ export const QueuePlugin: Plugin = async ({ client }) => {
           throw new Error(HANDLED)
         }
 
+        if (op.kind === "compact") {
+          await tuiCommand("session_compact")
+          throw new Error(HANDLED)
+        }
+
         if (op.kind === "command") {
           await client.session.command({ path: { id: sid }, body: { command: op.cmd, arguments: op.args, parts } as any })
           throw new Error(HANDLED)
@@ -412,6 +437,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       const current = state(sid)
       const parts = files(output.parts)
       const op = parse(request, parts.length)
+      const meta = input as Meta
 
       if (control(op)) {
         hide(output.message.id, text)
@@ -427,6 +453,11 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
       if (current.activity.kind === "idle" && !current.stopped) {
         if (op.kind === "command") return
+        if (op.kind === "compact") {
+          hide(output.message.id, text)
+          await compact(sid, { agent: output.message.agent, model: output.message.model, variant: meta.variant, controls: meta.controls, fast: meta.fast })
+          return
+        }
         if (op.kind === "shell") {
           hide(output.message.id, text)
           await shell(sid, op.shell, { agent: output.message.agent, model: output.message.model })
@@ -436,13 +467,13 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         return
       }
 
-      const meta = input as Meta
       const info = { agent: output.message.agent, model: { ...output.message.model }, variant: meta.variant, controls: meta.controls, fast: meta.fast }
       const prior = await latest(sid)
       if (prior) Object.assign(output.message, opts(prior))
       else console.warn("QueuePlugin could not neutralize queued placeholder metadata because the session has no previous message context")
       let item: Item
       if (op.kind === "shell") item = { kind: "shell", info, source: op.source, shell: op.shell }
+      else if (op.kind === "compact") item = { kind: "compact", info, source: op.source }
       else if (op.kind === "command") item = { kind: "command", info, source: op.source, cmd: op.cmd, args: op.args, files: parts }
       else {
         item = {
