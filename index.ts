@@ -6,6 +6,7 @@ const SUFFIX = /^([\s\S]*?)\s+\/queue(?:\s+(front))?\s*$/
 const CMD = /^\/(\S+)(?:\s+([\s\S]*))?$/
 const ITEM_NUMBER = /^[1-9]\d*$/
 const HANDLED = "__QUEUE_HANDLED__"
+const TUI_COMPACT = "session_compact"
 
 type InputPart = TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput
 type Model = { providerID: string; modelID: string }
@@ -125,6 +126,9 @@ const control = (op: Op): op is ControlOp => {
       return false
   }
 }
+const shouldQueue = (state?: State) => Boolean(state && (state.activity.kind !== "idle" || state.stopped))
+const shouldDeclinePlan = (state?: State) => Boolean(state && (state.activity.kind === "sending" || (!state.stopped && state.items.length)))
+const itemText = (item: Item) => (item.kind === "prompt" ? item.body.trim() || item.label : item.source)
 const plan = (event: unknown): event is Ask => {
   if (typeof event !== "object" || !event || !("type" in event) || event.type !== "question.asked") return false
   const question = (event as Ask).properties?.questions?.[0]
@@ -215,7 +219,6 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
   const opts = (info: Info) => ({ agent: info.agent, model: info.model, variant: info.variant, controls: info.controls, fast: info.fast })
 
-  const prompt = (sid: string, info: Info, parts: InputPart[], noReply?: boolean) => client.session.prompt({ path: { id: sid }, body: { ...opts(info), noReply, parts } as any })
   const shell = (sid: string, command: string, info: Run) => client.session.shell({ path: { id: sid }, body: { agent: info.agent, model: info.model, command } })
   // TUI command events target the focused session; queued replay must target the original session.
   const compact = (sid: string, info: Info) =>
@@ -224,30 +227,34 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       body: { providerID: info.model.providerID, modelID: info.model.modelID },
       throwOnError: true,
     })
-  const tuiCommand = (command: string) => client.tui.executeCommand({ body: { command }, throwOnError: true })
 
   const replay = async (sid: string, item: Item) => {
-    if (item.kind === "shell") return shell(sid, item.shell, item.info)
-    if (item.kind === "compact") return compact(sid, item.info)
+    switch (item.kind) {
+      case "shell":
+        return shell(sid, item.shell, item.info)
+      case "compact":
+        return compact(sid, item.info)
+      case "command":
+        return client.session.command({
+          path: { id: sid },
+          body: {
+            ...opts(item.info),
+            model: `${item.info.model.providerID}/${item.info.model.modelID}`,
+            command: item.cmd,
+            arguments: item.args,
+            parts: item.files,
+          } as any,
+        })
+      case "prompt": {
+        if (!item.parts.length) {
+          console.warn("QueuePlugin skipped queued item without replayable content")
+          return
+        }
 
-    if (item.kind === "command") {
-      await client.session.command({
-        path: { id: sid },
-        body: {
-          ...opts(item.info),
-          model: `${item.info.model.providerID}/${item.info.model.modelID}`,
-          command: item.cmd,
-          arguments: item.args,
-          parts: item.files,
-        } as any,
-      })
-      return
+        const parts = item.parts.map((part) => ({ ...part, id: undefined }))
+        return client.session.prompt({ path: { id: sid }, body: { ...opts(item.info), parts } as any })
+      }
     }
-
-    if (item.parts.length) {
-      return prompt(sid, item.info, item.parts.map((part) => ({ ...part, id: undefined })))
-    }
-    console.warn("QueuePlugin skipped queued item without replayable content")
   }
 
   const advance = (sid: string) => {
@@ -309,10 +316,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
     switch (op.kind) {
       case "list": {
-        const list =
-          current.items
-            .map((item, i) => `${i + 1}. ${item.kind === "prompt" ? (item.body.trim() ? item.body : item.label) : item.source}`)
-            .join("\n") || "Queue is empty"
+        const list = current.items.map((item, i) => `${i + 1}. ${itemText(item)}`).join("\n") || "Queue is empty"
         return current.stopped ? `${list}\nQueue is stopped` : list
       }
       case "clear":
@@ -343,8 +347,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
     event: async ({ event }) => {
       if (plan(event)) {
         const sid = event.properties.sessionID
-        const current = sessions.get(sid)
-        if (!current || (current.activity.kind !== "sending" && (current.stopped || !current.items.length))) return
+        if (!shouldDeclinePlan(sessions.get(sid))) return
         await no(event.properties.id)
         await toast("Declined plan approval to continue queued work", "info")
         return
@@ -386,9 +389,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         const queued = parseSuffix(body)
         if (!queued) return
 
-        const current = sessions.get(sid)
-        const shouldQueue = Boolean(current && (current.activity.kind !== "idle" || current.stopped))
-        if (!shouldQueue) {
+        if (!shouldQueue(sessions.get(sid))) {
           for (const part of output.parts) if (part.type === "text") part.text = stripSuffix(part.text)
           return
         }
@@ -397,21 +398,19 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         return
       }
 
-      const current = sessions.get(sid)
-      const shouldQueue = Boolean(current && (current.activity.kind !== "idle" || current.stopped))
       const op = parse(parsePrefix(body), parts.length)
 
       if (control(op)) return stop(await manage(sid, op))
       if (op.kind === "invalid") return stop(op.message, "error")
 
-      if (!shouldQueue) {
+      if (!shouldQueue(sessions.get(sid))) {
         if (op.kind === "shell") {
           await shell(sid, op.shell, await run(sid))
           throw new Error(HANDLED)
         }
 
         if (op.kind === "compact") {
-          await tuiCommand("session_compact")
+          await client.tui.executeCommand({ body: { command: TUI_COMPACT }, throwOnError: true })
           throw new Error(HANDLED)
         }
 
@@ -493,7 +492,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       if (op.front) current.items.unshift(item)
       else current.items.push(item)
       hide(output.message.id, text)
-      await toast(`${op.front ? "Queued first" : "Queued"}: ${item.kind === "prompt" ? item.label : item.source}`, "info")
+      await toast(`${op.front ? "Queued first" : "Queued"}: ${itemText(item)}`, "info")
     },
     "experimental.chat.messages.transform": async (_, output) => {
       output.messages = output.messages.filter((msg) => !hidden.has(msg.info.id))
