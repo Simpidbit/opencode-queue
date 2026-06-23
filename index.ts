@@ -1,11 +1,11 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import type { AgentPartInput, FilePart, FilePartInput, SubtaskPartInput, TextPart, TextPartInput } from "@opencode-ai/sdk"
+import { HttpServerResponse } from "effect/unstable/http"
 
 const QUEUE = /^\/queue(?:\s+([\s\S]*))?$/
 const SUFFIX = /^([\s\S]*?)\s+\/queue(?:\s+(front))?\s*$/
 const CMD = /^\/(\S+)(?:\s+([\s\S]*))?$/
 const ITEM_NUMBER = /^[1-9]\d*$/
-const HANDLED = "__QUEUE_HANDLED__"
 const TUI_COMPACT = "session_compact"
 
 type InputPart = TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput
@@ -129,6 +129,11 @@ const control = (op: Op): op is ControlOp => {
 const shouldQueue = (state?: State) => Boolean(state && (state.activity.kind !== "idle" || state.stopped))
 const shouldDeclinePlan = (state?: State) => Boolean(state && (state.activity.kind === "sending" || (!state.stopped && state.items.length)))
 const itemText = (item: Item) => (item.kind === "prompt" ? item.body.trim() || item.label : item.source)
+// OpenCode's command hook has no cancel/noReply output. Throwing a raw Effect
+// response is handled by OpenCode's HTTP layer as an empty successful command.
+const handled = (): never => {
+  throw HttpServerResponse.empty({ status: 204 })
+}
 const plan = (event: unknown): event is Ask => {
   if (typeof event !== "object" || !event || !("type" in event) || event.type !== "question.asked") return false
   const question = (event as Ask).properties?.questions?.[0]
@@ -154,7 +159,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
 
   const stop = async (message: string, variant: "info" | "error" = "info", duration = 5000): Promise<never> => {
     await toast(message, variant, duration)
-    throw new Error(HANDLED)
+    return handled()
   }
 
   const no = async (id: string) => {
@@ -406,17 +411,17 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       if (!shouldQueue(sessions.get(sid))) {
         if (op.kind === "shell") {
           await shell(sid, op.shell, await run(sid))
-          throw new Error(HANDLED)
+          return handled()
         }
 
         if (op.kind === "compact") {
           await client.tui.executeCommand({ body: { command: TUI_COMPACT }, throwOnError: true })
-          throw new Error(HANDLED)
+          return handled()
         }
 
         if (op.kind === "command") {
           await client.session.command({ path: { id: sid }, body: { command: op.cmd, arguments: op.args, parts } as any })
-          throw new Error(HANDLED)
+          return handled()
         }
 
         output.parts.splice(0, output.parts.length, { type: "text", text: op.body } as any, ...parts)
