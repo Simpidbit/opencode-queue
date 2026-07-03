@@ -79,6 +79,7 @@ When the session is busy:
 
 - Queued entries are hidden from the transcript and from the running agent.
 - The current agent run keeps using its original agent, model, and thinking variant.
+- Each queued entry replays with the agent, model, and thinking variant selected when it was queued.
 - Queued entries replay in order after the session completes normally and becomes idle.
 - `/queue front ...` puts an entry before the existing queued entries.
 - Only one queued entry is sent per idle transition, so queued work runs one item at a time.

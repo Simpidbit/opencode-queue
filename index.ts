@@ -10,10 +10,9 @@ const TUI_COMPACT = "session_compact"
 
 type InputPart = TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput
 type Model = { providerID: string; modelID: string }
-type Meta = { variant?: string; controls?: string[]; fast?: boolean }
 type Run = { agent: string; model?: Model }
-type Info = { agent: string; model: Model } & Meta
-type Msg = { info: { role: string; agent?: string; mode?: string; model?: Model; providerID?: string; modelID?: string } & Meta }
+type Info = { agent: string; model: Model; variant?: string }
+type Msg = { info: { role: string; agent?: string; mode?: string; model?: Model; providerID?: string; modelID?: string; variant?: string } }
 type Ask = { type: string; properties: { id: string; sessionID: string; questions: { question: string; header: string }[] } }
 type Post = (input: { url: string; path?: Record<string, string>; body?: unknown; headers?: Record<string, string> }) => Promise<{ response?: Response; error?: unknown } | undefined>
 type QueueInput = { body: string; front: boolean }
@@ -207,9 +206,9 @@ export const QueuePlugin: Plugin = async ({ client }) => {
     })
 
     return ([...(Array.isArray(result) ? result : (result.data ?? []))].reverse() as Msg[]).flatMap((msg): Info[] => {
-      if (msg.info.role === "user" && msg.info.agent && msg.info.model) return [{ agent: msg.info.agent, model: msg.info.model, variant: msg.info.variant, controls: msg.info.controls, fast: msg.info.fast }]
+      if (msg.info.role === "user" && msg.info.agent && msg.info.model) return [{ agent: msg.info.agent, model: msg.info.model, variant: msg.info.variant }]
       if (msg.info.role === "assistant" && (msg.info.agent || msg.info.mode) && msg.info.providerID && msg.info.modelID) {
-        return [{ agent: msg.info.agent ?? msg.info.mode!, model: { providerID: msg.info.providerID, modelID: msg.info.modelID }, variant: msg.info.variant, controls: msg.info.controls, fast: msg.info.fast }]
+        return [{ agent: msg.info.agent ?? msg.info.mode!, model: { providerID: msg.info.providerID, modelID: msg.info.modelID }, variant: msg.info.variant }]
       }
       return []
     })[0]
@@ -222,7 +221,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
     return { agent: "build" }
   }
 
-  const opts = (info: Info) => ({ agent: info.agent, model: info.model, variant: info.variant, controls: info.controls, fast: info.fast })
+  const opts = (info: Info) => ({ agent: info.agent, model: info.model, variant: info.variant })
 
   const shell = (sid: string, command: string, info: Run) => client.session.shell({ path: { id: sid }, body: { agent: info.agent, model: info.model, command } })
   // TUI command events target the focused session; queued replay must target the original session.
@@ -441,7 +440,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
       const current = state(sid)
       const parts = files(output.parts)
       const op = parse(request, parts.length)
-      const meta = input as Meta
+      const info = { agent: input.agent ?? output.message.agent, model: input.model ?? output.message.model, variant: input.variant }
 
       if (control(op)) {
         hide(output.message.id, text)
@@ -459,19 +458,18 @@ export const QueuePlugin: Plugin = async ({ client }) => {
         if (op.kind === "command") return
         if (op.kind === "compact") {
           hide(output.message.id, text)
-          await compact(sid, { agent: output.message.agent, model: output.message.model, variant: meta.variant, controls: meta.controls, fast: meta.fast })
+          await compact(sid, info)
           return
         }
         if (op.kind === "shell") {
           hide(output.message.id, text)
-          await shell(sid, op.shell, { agent: output.message.agent, model: output.message.model })
+          await shell(sid, op.shell, info)
           return
         }
         text.text = request.body
         return
       }
 
-      const info = { agent: output.message.agent, model: { ...output.message.model }, variant: meta.variant, controls: meta.controls, fast: meta.fast }
       const prior = await latest(sid)
       if (prior) Object.assign(output.message, opts(prior))
       else console.warn("QueuePlugin could not neutralize queued placeholder metadata because the session has no previous message context")
