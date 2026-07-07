@@ -139,7 +139,7 @@ const plan = (event: unknown): event is Ask => {
   return question?.header === "Build Agent" && question.question.includes("switch to the build agent")
 }
 
-export const QueuePlugin: Plugin = async ({ client }) => {
+export const QueuePlugin: Plugin = async ({ client, directory }) => {
   const sessions = new Map<string, State>()
   const hidden = new Set<string>()
   const post = (client as unknown as { _client?: { post?: Post } })._client?.post
@@ -154,7 +154,7 @@ export const QueuePlugin: Plugin = async ({ client }) => {
   }
 
   const toast = (message: string, variant: "info" | "error", duration = 2500) =>
-    client.tui.showToast({ body: { message, variant, duration } }).catch(() => undefined)
+    client.tui.showToast({ body: { message, variant, duration }, query: { directory } }).catch(() => undefined)
 
   const stop = async (message: string, variant: "info" | "error" = "info", duration = 5000): Promise<never> => {
     await toast(message, variant, duration)
